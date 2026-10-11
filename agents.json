@@ -1,0 +1,10 @@
+{
+  "architecture": {
+    "skill": "skills/architecture.md",
+    "input": "input",
+    "archive": "archive",
+    "output": "output/architecture",
+    "task": "Create an architecture document from the supplied diagram.",
+    "model": "gpt-6-astra"
+  }
+}
