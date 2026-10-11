@@ -55,8 +55,10 @@ For example, `input/system.png` produces a document named `system.docx`.
 The document opens with an architecture description followed by the original chart
 image, before the detailed sections. The chart fits within the page margins and keeps
 its original proportions. PNG, JPEG, and WebP source images are embedded in Word.
-Every successful run also saves `skill.md` (the exact instructions used) and
-`run.json` (source path, hashes, task, model, timestamp, response ID, and usage).
+Every successful run also saves a copy of the original chart in the same output
+folder, preserving its filename and format, plus `skill.md` (the exact instructions
+used) and `run.json` (source path, saved chart filename, hashes, task, model, timestamp,
+response ID, and usage).
 After successful processing, the source image is moved from `input/` to `archive/`.
 An image that fails remains in `input/` so it can be retried. Dry runs never move files.
 If an archived filename already exists, the runner adds a timestamp and unique suffix
@@ -107,10 +109,36 @@ DOCUMENT_LANGUAGE=IL
 ```
 
 `IL` and `HE` select Hebrew. `AR`, `FA`, `UR`, and `YI` are also treated as RTL
-languages. For these values, the generated Word document applies right-to-left layout
-to headings, paragraphs, lists, table cells, and table direction, including lines that
-contain English technical identifiers. Common LTR values include `EN`, `FR`, `ES`, and
+languages. All Word headings are centered. For RTL languages, body paragraphs, lists,
+code blocks, and table cells are right-aligned, with right-to-left reading direction
+also applied to headings and table direction, including lines that contain English
+technical identifiers. Common LTR values include `EN`, `FR`, `ES`, and
 `DE`. Restart the watcher after changing `.env`.
+
+## Choose heading appearance
+
+Set `heading_style` inside each agent's entry in `agents.json`:
+
+```json
+"heading_style": {
+  "color": "#000000",
+  "font": "Arial",
+  "size": 16,
+  "bold": true,
+  "italic": false,
+  "underline": false
+}
+```
+
+These settings apply to all Word headings, including the document heading. `color`
+accepts a six-digit hex value with or without `#`; `font` is a font name installed
+on the computer opening the document; `size` is in points, from 1 to 96. Omitted
+settings default to black, Arial, and 16 points. `bold`, `italic`, and `underline`
+accept JSON `true` or `false`; their defaults are `true`, `false`, and `false`,
+respectively. These settings override inline Markdown formatting in headings and
+apply to RTL text too. Headings remain centered and keep
+their language's reading direction. The watcher reads changes on its next scan.
+Previously generated documents keep their existing appearance.
 
 ## Choose a provider and model
 
@@ -207,6 +235,9 @@ Only this file's contents are loaded; referenced files are not automatically inc
 No retraining or restart is needed for skill updates.
 
 The agent is prompted to check compliance and distinguish observed facts from assumptions.
+Architecture reports also include explanatory bullets that walk through visible data
+flows, discuss design tradeoffs and hypothetical failure or growth scenarios, and give
+readers focused questions and practical validation steps.
 This is model-guided compliance, not a deterministic guarantee. Review the generated document,
 especially small labels, arrow directions, and inferred details.
 

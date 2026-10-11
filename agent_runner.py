@@ -109,10 +109,63 @@ def _add_diagram(document, image_path):
     paragraph.add_run().add_picture(source, width=width, height=int(width / ratio))
 
 
-def write_word_document(markdown, output_path, rtl=False, image_path=None):
+def heading_style_settings(settings=None):
+    """Validate optional heading appearance settings and fill in defaults."""
+    if settings is None:
+        settings = {}
+    if not isinstance(settings, dict):
+        raise ValueError("heading_style must be an object with heading appearance settings")
+    unknown = settings.keys() - {"color", "font", "size", "bold", "italic", "underline"}
+    if unknown:
+        raise ValueError(f"Unknown heading_style settings: {', '.join(sorted(unknown))}")
+    result = {"color": "#000000", "font": "Arial", "size": 16,
+              "bold": True, "italic": False, "underline": False, **settings}
+    if not isinstance(result["color"], str) or not re.fullmatch(r"#?[0-9A-Fa-f]{6}", result["color"]):
+        raise ValueError("heading_style.color must be a six-digit hex color such as #000000")
+    if not isinstance(result["font"], str) or not result["font"].strip():
+        raise ValueError("heading_style.font must be a nonempty font name")
+    size = result["size"]
+    if isinstance(size, bool) or not isinstance(size, (int, float)) or not 1 <= size <= 96:
+        raise ValueError("heading_style.size must be a number from 1 to 96 points")
+    for option in ("bold", "italic", "underline"):
+        if not isinstance(result[option], bool):
+            raise ValueError(f"heading_style.{option} must be true or false")
+    result["color"] = result["color"].lstrip("#").upper()
+    result["font"] = result["font"].strip()
+    return result
+
+
+def _apply_heading_style(paragraph, settings):
+    """Apply heading appearance to Latin and complex-script text, including RTL text."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Pt, RGBColor
+
+    for run in paragraph.runs:
+        run.font.name = settings["font"]
+        run.font.size = Pt(settings["size"])
+        run.font.color.rgb = RGBColor.from_string(settings["color"])
+        run.bold = settings["bold"]
+        run.italic = settings["italic"]
+        run.underline = settings["underline"]
+        run.font.cs_bold = settings["bold"]
+        run.font.cs_italic = settings["italic"]
+        # Word uses separate font and size properties for Hebrew/Arabic and other scripts.
+        properties = run._r.get_or_add_rPr()
+        properties.rFonts.set(qn("w:cs"), settings["font"])
+        properties.rFonts.set(qn("w:eastAsia"), settings["font"])
+        complex_size = properties.find(qn("w:szCs"))
+        if complex_size is None:
+            complex_size = OxmlElement("w:szCs")
+            properties.append(complex_size)
+        complex_size.set(qn("w:val"), str(int(settings["size"] * 2)))
+
+
+def write_word_document(markdown, output_path, rtl=False, image_path=None, heading_style=None):
     """Convert model-produced Markdown into a readable .docx document."""
     try:
         from docx import Document
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.shared import Pt
     except ImportError:
         raise ValueError(
@@ -120,6 +173,7 @@ def write_word_document(markdown, output_path, rtl=False, image_path=None):
             "python -m pip install -r requirements.txt"
         ) from None
 
+    heading_style = heading_style_settings(heading_style)
     document = Document()
     styles = document.styles
     styles["Normal"].font.name = "Arial"
@@ -152,6 +206,7 @@ def write_word_document(markdown, output_path, rtl=False, image_path=None):
             run = paragraph.add_run(line)
             run.font.name = "Consolas"
             run.font.size = Pt(9)
+            _set_paragraph_direction(paragraph, line, rtl)
             index += 1
             continue
         if not stripped:
@@ -234,6 +289,10 @@ def write_word_document(markdown, output_path, rtl=False, image_path=None):
             continue
         _add_inline_markdown(paragraph, text)
         _set_paragraph_direction(paragraph, text, rtl)
+        if heading:
+            # Center every heading while retaining RTL reading direction when applicable.
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            _apply_heading_style(paragraph, heading_style)
         index += 1
 
     if image_path is not None and not diagram_added:
@@ -276,6 +335,7 @@ def read_config(root, agent):
     if "archive" in config and (not isinstance(config["archive"], str)
                                 or not config["archive"].strip()):
         raise ValueError("Agent configuration requires a nonempty 'archive' string")
+    config["heading_style"] = heading_style_settings(config.get("heading_style"))
     return config
 
 
@@ -318,7 +378,8 @@ def prepare(root, agent, path, task=None, model=None):
                 "skill": skill, "task": selected_task, "model": selected_model,
                 "provider": provider, "language": language or "skill-default",
                 "document_direction": document_direction,
-                "rules": RULES, "format_version": 5}
+                "heading_style": config["heading_style"],
+                "rules": RULES, "format_version": 9}
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     language_instruction = ""
     if language:
@@ -473,12 +534,15 @@ def process(root, agent, path, task=None, model=None, dry_run=False, force=False
     config, identity, fingerprint, payload = prepare(root, agent, path, task, model)
     output = root / config["output"]
     if not force and output.exists():
-        # A matching record counts only if its output artifact still exists.
+        # A matching record counts only if the Word document and saved chart still exist.
         for marker in output.glob("*/run.json"):
             try:
                 previous = json.loads(marker.read_text(encoding="utf-8"))
                 artifact = previous.get("artifact", "document.md")
-                if previous.get("fingerprint") == fingerprint and (marker.parent / artifact).is_file():
+                saved_image = previous.get("source_image", path.name)
+                if (previous.get("fingerprint") == fingerprint
+                        and (marker.parent / artifact).is_file()
+                        and (marker.parent / saved_image).is_file()):
                     print(f"Skipped unchanged: {path.name}")
                     return None
             except (OSError, ValueError):
@@ -493,12 +557,16 @@ def process(root, agent, path, task=None, model=None, dry_run=False, force=False
     run = output / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:12])
     run.mkdir(parents=True)
     artifact = run / f"{path.stem}.docx"
+    # Retain the original chart beside the document before the inbox image is archived.
+    saved_image = run / path.name
+    shutil.copy2(path, saved_image)
     write_word_document(document, artifact, identity["document_direction"] == "rtl",
-                        image_path=path)
+                        image_path=saved_image, heading_style=config["heading_style"])
     # Save the exact skill separately, then write the success record after the Word export.
     (run / "skill.md").write_text(identity.pop("skill"), encoding="utf-8")
     record = {**identity, **metadata, "fingerprint": fingerprint,
               "artifact": artifact.name,
+              "source_image": saved_image.name,
               "created_at": datetime.now(timezone.utc).isoformat()}
     (run / "run.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
     print(f"Created: {artifact}")

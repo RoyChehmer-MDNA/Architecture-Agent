@@ -40,7 +40,9 @@ that an unshown control is definitely absent from the real implementation.
    and uncertainty. Do not include human actors as services. Do not silently omit an
    unclear service; identify its label as partially readable or unreadable instead.
 4. Components: table with name, responsibility, evidence, and uncertainty
-5. Connections and data flows: source, destination, direction, and visible protocol
+5. Connections and data flows: source, destination, direction, and visible protocol.
+   Follow the connection inventory with a plain-language architecture walkthrough
+   using the reader guidance below.
 6. Deployment and infrastructure
 7. IAM and identity assessment: users, service identities, authentication, authorization,
    least privilege, role boundaries, workload identity, and privileged/admin access.
@@ -56,14 +58,64 @@ that an unshown control is definitely absent from the real implementation.
     query logs, centralized log destination, metrics, tracing, alerting, dashboards,
     retention, correlation IDs, and security detection/response ownership.
 12. Reliability, scaling, backup/recovery, and operations assessment.
-13. Consolidated remediation plan: table containing finding, status, evidence, impact,
+13. Design choices and tradeoffs: use the reader guidance below to explain the
+    consequences of the visible design and practical alternatives.
+14. Consolidated remediation plan: table containing finding, status, evidence, impact,
     priority, recommended solution, alternative solution, and exact diagram update.
     Group quick wins separately from longer-term improvements.
-14. Risks and recommendations (clearly separate from observed architecture)
-15. Assumptions and open questions. Include the evidence or owner needed to validate
+15. Risks and recommendations (clearly separate from observed architecture)
+16. Assumptions and open questions. Include the evidence or owner needed to validate
     every `Unclear` or `Potential concern` finding.
-16. Review checklist: explicitly confirm that every visible service is represented in
+17. Questions for the reader: use the reader guidance below to identify decisions
+    and evidence needed before adopting or changing this architecture.
+18. Review checklist: explicitly confirm that every visible service is represented in
     the service inventory, confirm coverage of this skill, and identify unresolved requirements
+
+## Reader guidance
+Add useful explanatory bullets to the sections above so a reader understands how
+the components work together and what decisions still need attention. Translate
+all bullet labels and questions into the selected document language. Tie each bullet
+to named components or visible connections in this diagram; avoid generic advice.
+
+### Architecture walkthrough
+- Explain the user or business outcome the system supports. If the diagram does not
+  establish it, identify it as an open question rather than inventing a purpose.
+- Trace a representative request or data journey from the visible entry point through
+  processing and storage to its destination. Explain what each step contributes.
+  Do not invent return arrows, processing order, or protocols where none are shown.
+- Explain why the main component boundaries matter: which responsibilities are
+  separated, which services depend on each other, and where data changes ownership
+  or crosses a trust boundary. Label inferred benefits as Inferences.
+- Explain important technical terms in everyday language when first used, while
+  preserving exact service and product names.
+
+### Design choices and tradeoffs
+- Discuss two to four relevant choices suggested by this diagram, such as synchronous
+  versus asynchronous communication, shared versus separate storage, or managed
+  services versus self-managed infrastructure. Select only choices relevant to the
+  visible architecture; alternatives are Recommendations, not observed facts.
+- For each choice, explain the visible evidence, the possible benefit, the cost or
+  limitation, a practical alternative, and the conditions that would favor it.
+  Describe consequences without claiming to know the original designer's intent.
+- Consider latency, scaling, operating cost, maintainability, and provider dependence
+  where relevant. Do not invent prices, throughput, performance targets, or guarantees.
+- Explore two relevant hypothetical scenarios, such as a named dependency becoming
+  unavailable, traffic increasing, or data access changing. Explain which visible
+  components could be affected, what behavior is unknown, and how to validate it.
+  Cross-reference existing assessment findings instead of repeating their full details.
+
+### Questions for the reader
+- Provide four to six focused questions tied to this diagram. Cover relevant decisions
+  such as the acceptable delay in a visible flow, recovery from a named dependency
+  failure, data ownership, growth expectations, or responsibility for operations.
+- For each question, explain why the answer matters, what design choice it affects,
+  and which evidence or responsible role could answer it. Suggest a role when ownership
+  is not shown; do not claim an owner has already been assigned.
+- End with two or three practical next steps that help validate the architecture,
+  such as tracing a request, testing a dependency failure, or confirming an access boundary.
+  Reference related remediation items rather than creating contradictory action plans.
+- Keep explanatory bullets distinct from assessment findings. Any new finding must
+  follow the assessment status and evidence requirements above.
 
 ## Output language
 Fallback document language: IL
