@@ -127,7 +127,7 @@ class RunnerTests(unittest.TestCase):
         folder.mkdir()
         polls = 0
 
-        def next_poll(seconds):
+        def next_poll(seconds, stop_event=None):
             nonlocal polls
             polls += 1
             if polls == 1:
@@ -136,11 +136,56 @@ class RunnerTests(unittest.TestCase):
                 raise KeyboardInterrupt
 
         with patch.object(runner, "ROOT", self.root), \
-             patch.object(runner.time, "sleep", side_effect=next_poll), \
+             patch.object(runner, "wait_for_next_scan", side_effect=next_poll), \
              patch.object(runner, "process") as process:
             self.assertEqual(runner.main([]), 0)
         process.assert_called_once()
         self.assertEqual(process.call_args.args[2], folder / "new.png")
+
+    def test_countdown_respects_fractional_interval(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        now = 0.0
+        delays = []
+
+        def advance(seconds):
+            nonlocal now
+            delays.append(seconds)
+            now += seconds
+
+        output = StringIO()
+        with patch.object(runner.time, "monotonic", side_effect=lambda: now), \
+             patch.object(runner.time, "sleep", side_effect=advance), redirect_stdout(output):
+            self.assertFalse(runner.wait_for_next_scan(2.5))
+        self.assertEqual(delays, [1, 1, 0.5])
+        self.assertIn("Next input scan in 3s.", output.getvalue())
+        self.assertIn("Next input scan in 2s.", output.getvalue())
+        self.assertIn("Next input scan in 1s.", output.getvalue())
+
+    def test_countdown_stops_immediately_on_enter_event(self):
+        stop_event = runner.threading.Event()
+        with patch.object(stop_event, "wait", side_effect=lambda delay: stop_event.set() or True) as wait, \
+             patch.object(runner.time, "sleep") as sleep:
+            self.assertTrue(runner.wait_for_next_scan(5, stop_event))
+        wait.assert_called_once()
+        self.assertLessEqual(wait.call_args.args[0], 1)
+        sleep.assert_not_called()
+
+    def test_progress_messages_follow_processing_steps(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        output = StringIO()
+        with redirect_stdout(output):
+            self.run_image()
+        messages = output.getvalue()
+        steps = ["Preparing diagram.png", "Requesting architecture description", "Received document text",
+                 "Creating output folder", "Copying original chart", "Building Word document",
+                 "Embedding chart", "Saving Word document", "Saving skill snapshot",
+                 "Saving successful run metadata", "Created:"]
+        positions = [messages.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
 
     def test_failed_call_does_not_mark_success(self):
         def fail(payload):
@@ -260,7 +305,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn(b"<w:bidi", xml)
         self.assertIn(b"<w:bidiVisual", xml)
 
-    def test_headings_are_centered_and_rtl_body_starts_on_right(self):
+    def test_first_heading_is_centered_and_other_rtl_text_aligns_left(self):
         from docx import Document
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.oxml.ns import qn
@@ -275,20 +320,22 @@ class RunnerTests(unittest.TestCase):
                 runner.write_word_document(markdown, output, rtl=rtl)
                 document = Document(output)
                 headings = document.paragraphs[:6]
-                self.assertTrue(all(p.alignment == WD_ALIGN_PARAGRAPH.CENTER for p in headings))
+                self.assertEqual(headings[0].alignment, WD_ALIGN_PARAGRAPH.CENTER)
+                expected = WD_ALIGN_PARAGRAPH.LEFT if rtl else WD_ALIGN_PARAGRAPH.CENTER
+                self.assertTrue(all(p.alignment == expected for p in headings[1:]))
                 if rtl:
                     body = document.paragraphs[6:] + [
                         cell.paragraphs[0] for row in document.tables[0].rows for cell in row.cells]
-                    self.assertTrue(all(p.alignment == WD_ALIGN_PARAGRAPH.RIGHT for p in body))
+                    self.assertTrue(all(p.alignment == WD_ALIGN_PARAGRAPH.LEFT for p in body))
                     for paragraph in headings + body:
                         self.assertIsNotNone(paragraph._p.pPr.find(qn("w:bidi")))
 
-        # Auto-detected RTL text also aligns right without a runtime language override.
+        # Auto-detected RTL text also aligns left without a runtime language override.
         output = self.root / "detected-rtl.docx"
         runner.write_word_document("# כותרת\n\nתיאור בעברית", output)
         document = Document(output)
         self.assertEqual(document.paragraphs[0].alignment, WD_ALIGN_PARAGRAPH.CENTER)
-        self.assertEqual(document.paragraphs[1].alignment, WD_ALIGN_PARAGRAPH.RIGHT)
+        self.assertEqual(document.paragraphs[1].alignment, WD_ALIGN_PARAGRAPH.LEFT)
 
     def test_heading_settings_apply_to_all_levels_and_rtl_fonts(self):
         from docx import Document
@@ -306,17 +353,40 @@ class RunnerTests(unittest.TestCase):
                 return "\n\n".join("#" * level + " Heading" for level in range(1, 7)), {}
             run = runner.process(self.root, "architecture", self.image, provider=provider)
         document = Document(run / "diagram.docx")
-        for paragraph in document.paragraphs[:6]:
-            self.assertEqual(paragraph.alignment, WD_ALIGN_PARAGRAPH.CENTER)
+        for index, paragraph in enumerate(document.paragraphs[:6]):
+            self.assertEqual(paragraph.alignment,
+                             WD_ALIGN_PARAGRAPH.CENTER if index == 0 else WD_ALIGN_PARAGRAPH.LEFT)
             self.assertIsNotNone(paragraph._p.pPr.find(qn("w:bidi")))
             for word_run in paragraph.runs:
                 self.assertEqual(word_run.font.name, "Calibri")
-                self.assertEqual(word_run.font.size, Pt(19.5))
+                self.assertEqual(word_run.font.size, Pt(23.5 if index == 0 else 19.5))
                 self.assertEqual(str(word_run.font.color.rgb), "123ABC")
                 self.assertEqual(word_run._r.rPr.rFonts.get(qn("w:cs")), "Calibri")
-                self.assertEqual(word_run._r.rPr.find(qn("w:szCs")).get(qn("w:val")), "39")
+                self.assertEqual(word_run._r.rPr.find(qn("w:szCs")).get(qn("w:val")),
+                                 "47" if index == 0 else "39")
         record = json.loads((run / "run.json").read_text())
         self.assertEqual(record["heading_style"]["color"], "123ABC")
+
+    def test_rtl_time_is_right_aligned_in_first_page_header_only(self):
+        from datetime import datetime
+        from docx import Document
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        output = self.root / "timestamp.docx"
+        with patch.object(runner, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 10, 12, 14, 30, 45)
+            runner.write_word_document("# Heading\n\nBody", output, rtl=True)
+            self.assertEqual(clock.now.call_args.args[0].key, "Asia/Jerusalem")
+        section = Document(output).sections[0]
+        self.assertTrue(section.different_first_page_header_footer)
+        self.assertEqual(section.first_page_header.paragraphs[0].text, "14:30:45")
+        self.assertEqual(section.first_page_header.paragraphs[0].alignment, WD_ALIGN_PARAGRAPH.RIGHT)
+        self.assertEqual(section.header.paragraphs[0].text, "")
+
+        runner.write_word_document("# Heading\n\nBody", output)
+        section = Document(output).sections[0]
+        self.assertFalse(section.different_first_page_header_footer)
+        self.assertEqual(section.first_page_header.paragraphs[0].text, "")
 
     def test_heading_style_change_regenerates_document(self):
         first = self.run_image()

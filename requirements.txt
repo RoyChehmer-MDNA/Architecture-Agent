@@ -1,4 +1,5 @@
 # Word output dependency, plus the AWS SDK used when AI_PROVIDER=bedrock.
 python-docx>=1.1.2,<2
 Pillow>=10,<13
+tzdata>=2025.2
 boto3[crt]>=1.41.0,<2

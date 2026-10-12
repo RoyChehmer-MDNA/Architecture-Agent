@@ -7,12 +7,9 @@
     "task": "Create an architecture document from the supplied diagram.",
     "model": "gpt-6-astra",
     "heading_style": {
-      "color": "#000000",
-      "font": "Arial",
-      "size": 16,
-      "bold": true,
-      "italic": false,
-      "underline": false
+      "color": "#4F81BD",
+      "font": "Times New Roman",
+      "size": 12
     }
   }
 }

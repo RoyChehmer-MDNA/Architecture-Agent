@@ -82,6 +82,13 @@ time to remain unchanged across two polls. For large/slow copies,
 copy using a temporary extension and rename to `.png`/`.jpg`/`.webp` when finished.
 Run only one watcher per agent to avoid duplicate API calls.
 
+The terminal reports each stage: scanning, waiting for stable files, checking previous
+jobs, loading instructions, calling the provider, building and saving Word output,
+copying the chart, saving run metadata, and archiving the input. Between scans it
+shows a countdown that updates every second. Change the polling interval with
+`python agent_runner.py watch --interval 10`. Pressing Enter interrupts the countdown
+immediately; an active provider request finishes before shutdown.
+
 Unchanged successful jobs are skipped, including after restarting. Editing the skill,
 task, model, or image creates a new job on the next scan. Editing the skill while a
 request is running applies to the next request. Failed API jobs are attempted once per
@@ -109,11 +116,15 @@ DOCUMENT_LANGUAGE=IL
 ```
 
 `IL` and `HE` select Hebrew. `AR`, `FA`, `UR`, and `YI` are also treated as RTL
-languages. All Word headings are centered. For RTL languages, body paragraphs, lists,
-code blocks, and table cells are right-aligned, with right-to-left reading direction
+languages. The first Word heading is centered. For RTL languages, later headings,
+body paragraphs, lists, code blocks, and table cells are left-aligned, with right-to-left reading direction
 also applied to headings and table direction, including lines that contain English
 technical identifiers. Common LTR values include `EN`, `FR`, `ES`, and
 `DE`. Restart the watcher after changing `.env`.
+
+RTL documents also show their generation time (`HH:MM:SS`, Asia/Jerusalem) at the
+right of the first page's header. This saved timestamp appears only on the first page
+and does not change when the document is opened later.
 
 ## Choose heading appearance
 
@@ -130,14 +141,16 @@ Set `heading_style` inside each agent's entry in `agents.json`:
 }
 ```
 
-These settings apply to all Word headings, including the document heading. `color`
+These settings apply to all Word headings. The first document heading uses `size + 4`
+points, with the same font, color, and emphasis settings; later headings use `size`. `color`
 accepts a six-digit hex value with or without `#`; `font` is a font name installed
 on the computer opening the document; `size` is in points, from 1 to 96. Omitted
 settings default to black, Arial, and 16 points. `bold`, `italic`, and `underline`
 accept JSON `true` or `false`; their defaults are `true`, `false`, and `false`,
 respectively. These settings override inline Markdown formatting in headings and
-apply to RTL text too. Headings remain centered and keep
-their language's reading direction. The watcher reads changes on its next scan.
+apply to RTL text too. The first heading stays centered; later RTL headings align
+left, while LTR headings remain centered. Reading direction is preserved.
+The watcher reads changes on its next scan.
 Previously generated documents keep their existing appearance.
 
 ## Choose a provider and model

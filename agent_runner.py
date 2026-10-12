@@ -3,6 +3,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -14,6 +15,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Resolve project files relative to this script, regardless of the terminal directory.
 ROOT = Path(__file__).resolve().parent
@@ -33,6 +35,37 @@ of the architecture: its purpose, main components, and visible relationships. Pu
 description before any detailed section headings. The runner embeds the supplied chart
 after this opening description; do not include Markdown image links or placeholders.
 Return only the final document."""
+
+
+def log_step(message):
+    """Flush progress immediately, including while a provider request is running."""
+    print(f"[Step] {message}", flush=True)
+
+
+def wait_for_next_scan(seconds, stop_event=None):
+    """Show a countdown without delaying Enter shutdown or changing the polling interval."""
+    deadline = time.monotonic() + seconds
+    interactive = sys.stdout.isatty()
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            if interactive:
+                print(flush=True)
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if interactive:
+                print(flush=True)
+            return False
+        message = f"Next input scan in {math.ceil(remaining)}s."
+        print(message, end="\r" if interactive else "\n", flush=True)
+        delay = min(1, remaining)
+        if stop_event is not None:
+            if stop_event.wait(delay):
+                if interactive:
+                    print(flush=True)
+                return True
+        else:
+            time.sleep(delay)
 
 
 def _add_inline_markdown(paragraph, text):
@@ -62,7 +95,7 @@ def _set_paragraph_direction(paragraph, text, force_rtl=False):
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
     # Alignment alone does not set reading direction: Word needs paragraph and run flags.
     bidi = OxmlElement("w:bidi")
     bidi.set(qn("w:val"), "1")
@@ -81,8 +114,10 @@ def _add_diagram(document, image_path):
     from docx.image.image import Image
     from docx.shared import Inches
 
+    log_step(f"Embedding chart in Word: {Path(image_path).name}")
     source = str(image_path)
     if Path(image_path).suffix.lower() == ".webp":
+        log_step("Converting WebP chart to PNG for Word embedding")
         # python-docx cannot embed WebP directly; convert in memory to leave the source intact.
         try:
             from PIL import Image as PillowImage
@@ -174,10 +209,26 @@ def write_word_document(markdown, output_path, rtl=False, image_path=None, headi
         ) from None
 
     heading_style = heading_style_settings(heading_style)
+    log_step("Building Word document: formatting headings, paragraphs, lists, and tables")
     document = Document()
     styles = document.styles
     styles["Normal"].font.name = "Arial"
     styles["Normal"].font.size = Pt(10.5)
+    if rtl or re.search(r"[\u0590-\u08ff]", markdown):
+        # Save the generation time in the user's timezone, only on the first page.
+        try:
+            generated_time = datetime.now(ZoneInfo("Asia/Jerusalem")).strftime("%H:%M:%S")
+        except ZoneInfoNotFoundError:
+            raise ValueError("Document timestamps require timezone data. Install it with: "
+                             "python -m pip install -r requirements.txt") from None
+        log_step("Adding generation time to the first-page header (Asia/Jerusalem)")
+        section = document.sections[0]
+        section.different_first_page_header_footer = True
+        header_paragraph = section.first_page_header.paragraphs[0]
+        header_paragraph.add_run(generated_time)
+        header_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        _apply_heading_style(header_paragraph, {**heading_style, "size": 10,
+                                               "bold": False, "italic": False, "underline": False})
     if rtl:
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
@@ -191,6 +242,7 @@ def write_word_document(markdown, output_path, rtl=False, image_path=None, headi
     index = 0
     in_code = False
     diagram_added = False
+    first_heading = True
     # Headings alone do not count as a description; wait for prose, a list, or a table.
     introductory_content = False
     while index < len(lines):
@@ -290,14 +342,20 @@ def write_word_document(markdown, output_path, rtl=False, image_path=None, headi
         _add_inline_markdown(paragraph, text)
         _set_paragraph_direction(paragraph, text, rtl)
         if heading:
-            # Center every heading while retaining RTL reading direction when applicable.
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            _apply_heading_style(paragraph, heading_style)
+            # Keep the first heading centered; later RTL headings follow the left-aligned body.
+            is_rtl_heading = rtl or bool(re.search(r"[\u0590-\u08ff]", text))
+            paragraph.alignment = (WD_ALIGN_PARAGRAPH.CENTER if first_heading or not is_rtl_heading
+                                   else WD_ALIGN_PARAGRAPH.LEFT)
+            # The document's first heading is four points larger than section headings.
+            settings = {**heading_style, "size": heading_style["size"] + 4} if first_heading else heading_style
+            _apply_heading_style(paragraph, settings)
+            first_heading = False
         index += 1
 
     if image_path is not None and not diagram_added:
         # Short responses may have no detailed headings; still include their chart at the end.
         _add_diagram(document, image_path)
+    log_step(f"Saving Word document: {output_path}")
     document.save(output_path)
 
 
@@ -379,7 +437,7 @@ def prepare(root, agent, path, task=None, model=None):
                 "provider": provider, "language": language or "skill-default",
                 "document_direction": document_direction,
                 "heading_style": config["heading_style"],
-                "rules": RULES, "format_version": 9}
+                "rules": RULES, "format_version": 11}
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     language_instruction = ""
     if language:
@@ -518,6 +576,7 @@ def archive_processed_image(root, config, path):
     source = path.resolve()
     # Explicit --image paths outside the configured inbox are processed but not moved.
     if source.parent != input_folder or not source.is_file():
+        log_step(f"Leaving source in place (outside inbox or already moved): {path.name}")
         return None
     archive_folder = root / config.get("archive", "archive")
     archive_folder.mkdir(parents=True, exist_ok=True)
@@ -525,15 +584,20 @@ def archive_processed_image(root, config, path):
     if destination.exists():
         suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8]
         destination = archive_folder / f"{path.stem}-{suffix}{path.suffix}"
+    log_step(f"Moving processed input to archive: {destination}")
     shutil.move(str(source), str(destination))
     print(f"Archived: {destination}")
     return destination
 
 
 def process(root, agent, path, task=None, model=None, dry_run=False, force=False, provider=None):
+    log_step(f"Preparing {path.name}: loading agent and skill, validating image, building request")
     config, identity, fingerprint, payload = prepare(root, agent, path, task, model)
+    log_step(f"Selected provider={identity['provider']} | model={identity['model']} | "
+             f"language={identity['language']} | direction={identity['document_direction']}")
     output = root / config["output"]
     if not force and output.exists():
+        log_step("Checking previous successful outputs for an unchanged job")
         # A matching record counts only if the Word document and saved chart still exist.
         for marker in output.glob("*/run.json"):
             try:
@@ -543,33 +607,41 @@ def process(root, agent, path, task=None, model=None, dry_run=False, force=False
                 if (previous.get("fingerprint") == fingerprint
                         and (marker.parent / artifact).is_file()
                         and (marker.parent / saved_image).is_file()):
-                    print(f"Skipped unchanged: {path.name}")
+                    print(f"Skipped unchanged: {path.name}", flush=True)
                     return None
             except (OSError, ValueError):
                 continue
     if dry_run:
+        log_step("Dry run complete: no provider request, saved output, or archiving")
         print(f"Ready: {path.name} | agent={agent} | provider={identity['provider']} | "
               f"model={identity['model']} | skill={config['skill']}")
         return None
     # Tests can inject a simulated provider here without issuing paid API requests.
     api = provider or (lambda request: call_selected_provider(request, identity["provider"]))
+    log_step(f"Requesting architecture description from {identity['provider']}; waiting for response")
+    request_started = time.monotonic()
     document, metadata = api(payload)
+    log_step(f"Received document text after {time.monotonic() - request_started:.1f}s")
     run = output / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:12])
+    log_step(f"Creating output folder: {run}")
     run.mkdir(parents=True)
     artifact = run / f"{path.stem}.docx"
     # Retain the original chart beside the document before the inbox image is archived.
     saved_image = run / path.name
+    log_step(f"Copying original chart to output: {saved_image.name}")
     shutil.copy2(path, saved_image)
     write_word_document(document, artifact, identity["document_direction"] == "rtl",
                         image_path=saved_image, heading_style=config["heading_style"])
     # Save the exact skill separately, then write the success record after the Word export.
+    log_step("Saving skill snapshot: skill.md")
     (run / "skill.md").write_text(identity.pop("skill"), encoding="utf-8")
     record = {**identity, **metadata, "fingerprint": fingerprint,
               "artifact": artifact.name,
               "source_image": saved_image.name,
               "created_at": datetime.now(timezone.utc).isoformat()}
+    log_step("Saving successful run metadata: run.json")
     (run / "run.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
-    print(f"Created: {artifact}")
+    print(f"Created: {artifact}", flush=True)
     return run
 
 
@@ -590,6 +662,7 @@ def main(argv=None):
     if args.interval < 1 or not args.interval < float("inf"):
         parser.error("--interval must be finite and at least 1")
     try:
+        log_step("Loading local .env configuration (existing environment values take precedence)")
         load_env_file(ROOT / ".env")
         if args.command == "list":
             registry = json.loads((ROOT / "agents.json").read_text(encoding="utf-8-sig"))
@@ -609,12 +682,15 @@ def main(argv=None):
             stop_event = start_enter_listener()
         while True:
             # Reload the registry each scan; prepare() also rereads the skill for each image.
+            log_step(f"Loading agent configuration: {args.agent}")
             config = read_config(ROOT, args.agent)
             folder = ROOT / config["input"]
+            log_step(f"Scanning input: {args.image or folder}")
             if not args.image and not folder.is_dir():
                 raise ValueError(f"Input folder does not exist: {folder}")
             paths = [args.image] if args.image else sorted(p for p in folder.iterdir()
                 if p.is_file() and p.suffix.lower() in MIMES)
+            log_step(f"Found {len(paths)} supported image(s)")
             errors = 0
             current = {}
             for path in paths:
@@ -625,10 +701,13 @@ def main(argv=None):
                         signature = (stat.st_size, stat.st_mtime_ns)
                         current[path] = signature
                         if previous.get(path) != signature:
+                            log_step(f"Waiting for file to remain stable across scans: {path.name}")
                             continue  # Wait until unchanged across two polls before reading.
+                        log_step(f"Checking stable image and job fingerprint: {path.name}")
                         fingerprint = prepare(ROOT, args.agent, path, args.task, args.model)[2]
                         # Avoid duplicate work and repeated charges for failed jobs this session.
                         if fingerprint in failed or fingerprint in completed:
+                            log_step(f"Skipping job already attempted this session: {path.name}")
                             continue
                     process(ROOT, args.agent, path, args.task, args.model, args.dry_run, args.force)
                     if not args.dry_run:
@@ -637,22 +716,20 @@ def main(argv=None):
                     if fingerprint:
                         completed.add(fingerprint)
                 except (OSError, ValueError, RuntimeError) as exc:
-                    print(f"Error [{path.name}]: {exc}", file=sys.stderr)
+                    print(f"Error [{path.name}]: {exc}", file=sys.stderr, flush=True)
                     errors += 1
                     if args.command == "watch" and fingerprint:
                         failed.add(fingerprint)
+            log_step(f"Scan complete: {len(paths)} image(s) found, {errors} error(s)")
             if args.command == "run":
                 if not paths:
                     print(f"No supported images found in {folder}")
                 return 1 if errors else 0
             previous = current
-            if stop_event:
-                # Shutdown is checked between scans, allowing an active document to finish.
-                if stop_event.wait(args.interval):
-                    print("Watcher stopped.")
-                    return 0
-            else:
-                time.sleep(args.interval)
+            # Countdown waits are interruptible; an active document finishes before shutdown.
+            if wait_for_next_scan(args.interval, stop_event):
+                print("Watcher stopped.", flush=True)
+                return 0
     except KeyboardInterrupt:
         print("Watcher stopped.")
         return 0
